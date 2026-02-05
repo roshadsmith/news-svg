@@ -26,6 +26,7 @@ class AppController extends ChangeNotifier {
   final SettingsStore _settingsStore;
   final UpdateService _updateService;
   final Map<String, ArticleDetail> _detailCache = {};
+  static const int _batchSize = 4;
 
   NewsSettings _settings = NewsSettings.defaults(proxyUrl: defaultProxyUrl());
   List<Article> _articles = [];
@@ -63,6 +64,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> initialize() async {
     _settings = await _settingsStore.load();
+    _lastShownUpdateVersion = await _settingsStore.loadLastShownUpdateVersion();
     _initialized = true;
     notifyListeners();
     unawaited(checkForUpdate());
@@ -85,15 +87,35 @@ class AppController extends ChangeNotifier {
         _sourceRefreshPending = false;
         return;
       }
-      _articles = await _api.fetchArticles(
-        proxyUrl: _settings.proxyUrl,
-        sources: enabledSources,
-      );
-      _articles.sort((a, b) {
-        final aDate = a.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
-        final bDate = b.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
-        return bDate.compareTo(aDate);
-      });
+      final merged = <Article>[];
+      final seen = <String>{};
+      final batches = _chunkSources(enabledSources, _batchSize);
+
+      for (final batch in batches) {
+        try {
+          final batchItems = await _api.fetchArticles(
+            proxyUrl: _settings.proxyUrl,
+            sources: batch,
+          );
+          for (final article in batchItems) {
+            if (seen.add(article.url)) {
+              merged.add(article);
+            }
+          }
+          merged.sort((a, b) {
+            final aDate =
+                a.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+            final bDate =
+                b.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+            return bDate.compareTo(aDate);
+          });
+          _articles = List<Article>.from(merged);
+          _lastUpdated = DateTime.now();
+          notifyListeners();
+        } catch (error) {
+          _error ??= error.toString();
+        }
+      }
       _lastUpdated = DateTime.now();
       _sourceRefreshPending = false;
     } catch (error) {
@@ -201,6 +223,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> checkForUpdate() async {
+    if (kIsWeb) {
+      _updateInfo = null;
+      notifyListeners();
+      return;
+    }
     final updateUrl = _settings.updateUrl.trim();
     if (updateUrl.isEmpty) {
       _updateInfo = null;
@@ -221,9 +248,10 @@ class AppController extends ChangeNotifier {
     return _lastShownUpdateVersion != _updateInfo!.version;
   }
 
-  void markUpdatePromptShown() {
+  Future<void> markUpdatePromptShown() async {
     if (_updateInfo == null) return;
     _lastShownUpdateVersion = _updateInfo!.version;
+    await _settingsStore.saveLastShownUpdateVersion(_lastShownUpdateVersion!);
   }
 
   Future<void> updateSourceCategory(String id, NewsCategory category) async {
@@ -236,6 +264,15 @@ class AppController extends ChangeNotifier {
     _settings = _settings.copyWith(sources: updatedSources);
     await _settingsStore.save(_settings);
     notifyListeners();
+  }
+
+  List<List<SourceConfig>> _chunkSources(List<SourceConfig> sources, int size) {
+    final chunks = <List<SourceConfig>>[];
+    for (var i = 0; i < sources.length; i += size) {
+      final end = (i + size).clamp(0, sources.length);
+      chunks.add(sources.sublist(i, end));
+    }
+    return chunks;
   }
 
   String _deriveId(String name, String listUrl) {

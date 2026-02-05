@@ -35,10 +35,11 @@ const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 const MAX_ARTICLES_PER_SOURCE = 25;
 const ENRICH_CONCURRENCY = 5;
-const SOURCE_CONCURRENCY = 3;
-const FETCH_TIMEOUT_MS = 18000;
-const SOURCE_TIMEOUT_MS = 22000;
-const LIST_CACHE_TTL_MS = 60 * 1000;
+const SOURCE_CONCURRENCY = 4;
+const FETCH_TIMEOUT_MS = 8000;
+const SOURCE_TIMEOUT_MS = 12000;
+const REQUEST_TIMEOUT_MS = 12000;
+const LIST_CACHE_TTL_MS = 3 * 60 * 1000;
 const ARTICLE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
 const FALLBACK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -61,6 +62,8 @@ const listCache = new Map();
 const articleCache = new Map();
 const detailCache = new Map();
 const fallbackImageCache = new Map();
+let backgroundRefreshInFlight = false;
+let lastBackgroundRefresh = 0;
 
 function loadLocalEnv() {
   const currentFile = fileURLToPath(import.meta.url);
@@ -100,14 +103,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withTimeout(promise, ms, onTimeout) {
+async function withTimeout(promise, ms, onTimeout, onTimeoutError) {
   let timeoutId;
-  const timeout = new Promise((resolve) => {
-    timeoutId = setTimeout(() => resolve(onTimeout?.()), ms);
+  const timeout = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      if (onTimeoutError) {
+        reject(onTimeoutError);
+        return;
+      }
+      resolve(onTimeout?.());
+    }, ms);
   });
-  const result = await Promise.race([promise, timeout]);
-  clearTimeout(timeoutId);
-  return result;
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function buildFallbackQuery(title, sourceName) {
@@ -1363,6 +1374,27 @@ async function safeScrapeSourceWithTimeout(source) {
   );
 }
 
+function buildResponse(results, timedOut = false) {
+  const items = results.flatMap((result) => result.items || []);
+  return {
+    items,
+    sources: results.map(({ sourceId, sourceName }) => ({ sourceId, sourceName })),
+    partial: timedOut,
+  };
+}
+
+function maybeRefreshInBackground(sources) {
+  if (backgroundRefreshInFlight) return;
+  if (Date.now() - lastBackgroundRefresh < LIST_CACHE_TTL_MS / 2) return;
+  backgroundRefreshInFlight = true;
+  asyncPool(SOURCE_CONCURRENCY, sources, (source) => safeScrapeSource(source))
+    .catch(() => {})
+    .finally(() => {
+      backgroundRefreshInFlight = false;
+      lastBackgroundRefresh = Date.now();
+    });
+}
+
 function resolveSources(inputSources) {
   if (!Array.isArray(inputSources) || inputSources.length === 0) {
     return DEFAULT_SOURCES;
@@ -1490,27 +1522,63 @@ app.get("/api/news", async (req, res) => {
     ? DEFAULT_SOURCES.filter((source) => ids.includes(source.id))
     : DEFAULT_SOURCES;
 
-  const results = await asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
-    safeScrapeSourceWithTimeout(source),
-  );
-  const items = results.flatMap((result) => result.items || []);
-  res.json({
-    items,
-    sources: results.map(({ sourceId, sourceName }) => ({ sourceId, sourceName })),
-  });
+  let payload;
+  try {
+    const results = await withTimeout(
+      asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
+        safeScrapeSourceWithTimeout(source),
+      ),
+      REQUEST_TIMEOUT_MS,
+      () => [],
+      new Error("request timeout"),
+    );
+    const safeResults = Array.isArray(results) ? results : [];
+    payload = buildResponse(safeResults, false);
+  } catch {
+    const cachedResults = sources
+      .map((source) =>
+        getCache(
+          listCache,
+          `${source.listUrl}|${JSON.stringify(source.articleUrlPatterns || [])}`,
+          LIST_CACHE_TTL_MS,
+        ),
+      )
+      .filter(Boolean);
+    payload = buildResponse(cachedResults, true);
+  }
+  res.json(payload);
+  maybeRefreshInBackground(sources);
 });
 
 app.post("/api/news", async (req, res) => {
   const sources = resolveSources(req.body?.sources);
 
-  const results = await asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
-    safeScrapeSourceWithTimeout(source),
-  );
-  const items = results.flatMap((result) => result.items || []);
-  res.json({
-    items,
-    sources: results.map(({ sourceId, sourceName }) => ({ sourceId, sourceName })),
-  });
+  let payload;
+  try {
+    const results = await withTimeout(
+      asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
+        safeScrapeSourceWithTimeout(source),
+      ),
+      REQUEST_TIMEOUT_MS,
+      () => [],
+      new Error("request timeout"),
+    );
+    const safeResults = Array.isArray(results) ? results : [];
+    payload = buildResponse(safeResults, false);
+  } catch {
+    const cachedResults = sources
+      .map((source) =>
+        getCache(
+          listCache,
+          `${source.listUrl}|${JSON.stringify(source.articleUrlPatterns || [])}`,
+          LIST_CACHE_TTL_MS,
+        ),
+      )
+      .filter(Boolean);
+    payload = buildResponse(cachedResults, true);
+  }
+  res.json(payload);
+  maybeRefreshInBackground(sources);
 });
 
 app.post("/api/article", async (req, res) => {
