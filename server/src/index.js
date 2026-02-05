@@ -37,6 +37,7 @@ const MAX_ARTICLES_PER_SOURCE = 25;
 const ENRICH_CONCURRENCY = 5;
 const SOURCE_CONCURRENCY = 3;
 const FETCH_TIMEOUT_MS = 18000;
+const SOURCE_TIMEOUT_MS = 22000;
 const LIST_CACHE_TTL_MS = 60 * 1000;
 const ARTICLE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -97,6 +98,16 @@ function setCache(map, key, data) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout(promise, ms, onTimeout) {
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(onTimeout?.()), ms);
+  });
+  const result = await Promise.race([promise, timeout]);
+  clearTimeout(timeoutId);
+  return result;
 }
 
 function buildFallbackQuery(title, sourceName) {
@@ -1339,6 +1350,19 @@ async function safeScrapeSource(source) {
   }
 }
 
+async function safeScrapeSourceWithTimeout(source) {
+  return withTimeout(
+    safeScrapeSource(source),
+    SOURCE_TIMEOUT_MS,
+    () => ({
+      sourceId: source.id,
+      sourceName: source.name,
+      items: [],
+      error: "timeout",
+    }),
+  );
+}
+
 function resolveSources(inputSources) {
   if (!Array.isArray(inputSources) || inputSources.length === 0) {
     return DEFAULT_SOURCES;
@@ -1466,7 +1490,9 @@ app.get("/api/news", async (req, res) => {
     ? DEFAULT_SOURCES.filter((source) => ids.includes(source.id))
     : DEFAULT_SOURCES;
 
-  const results = await asyncPool(SOURCE_CONCURRENCY, sources, (source) => safeScrapeSource(source));
+  const results = await asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
+    safeScrapeSourceWithTimeout(source),
+  );
   const items = results.flatMap((result) => result.items || []);
   res.json({
     items,
@@ -1477,7 +1503,9 @@ app.get("/api/news", async (req, res) => {
 app.post("/api/news", async (req, res) => {
   const sources = resolveSources(req.body?.sources);
 
-  const results = await asyncPool(SOURCE_CONCURRENCY, sources, (source) => safeScrapeSource(source));
+  const results = await asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
+    safeScrapeSourceWithTimeout(source),
+  );
   const items = results.flatMap((result) => result.items || []);
   res.json({
     items,
