@@ -120,24 +120,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           TextField(
                             controller: _proxyController,
                             decoration: const InputDecoration(
-                              hintText: 'http://localhost:4000',
+                              hintText:
+                                  'https://server-rough-hill-9060.fly.dev',
                               border: OutlineInputBorder(),
                             ),
+                            enabled: false,
                           ),
                           const SizedBox(height: 10),
                           TextField(
                             controller: _updateController,
                             decoration: const InputDecoration(
-                              hintText: 'https://example.com/version.json',
+                              hintText:
+                                  'https://raw.githubusercontent.com/roshadsmith/news-svg/main/version.json',
                               border: OutlineInputBorder(),
                             ),
+                            enabled: false,
                           ),
                           const SizedBox(height: 10),
                           Align(
                             alignment: Alignment.centerRight,
                             child: FilledButton(
-                              onPressed: () => _saveAdvanced(context),
-                              child: const Text('Save'),
+                              onPressed: null,
+                              child: const Text('Locked'),
                             ),
                           ),
                         ],
