@@ -81,6 +81,7 @@ const fallbackImageCache = new Map();
 let backgroundRefreshInFlight = false;
 let lastBackgroundRefresh = 0;
 let db;
+let pendingProcesses = 0;
 
 function loadLocalEnv() {
   const currentFile = fileURLToPath(import.meta.url);
@@ -317,23 +318,29 @@ async function refreshAllSources() {
   });
 
   if (dueSources.length === 0) {
+    pendingProcesses = 0;
     await pruneOldArticles();
     return;
   }
 
-  const results = await asyncPool(SOURCE_CONCURRENCY, dueSources, (source) =>
-    safeScrapeSource(source),
-  );
-  for (const result of results) {
-    if (result?.items?.length) {
-      await upsertArticles(
-        { id: result.sourceId, name: result.sourceName },
-        result.items,
-      );
+  pendingProcesses = dueSources.length;
+  try {
+    const results = await asyncPool(SOURCE_CONCURRENCY, dueSources, (source) =>
+      safeScrapeSource(source),
+    );
+    for (const result of results) {
+      if (result?.items?.length) {
+        await upsertArticles(
+          { id: result.sourceId, name: result.sourceName },
+          result.items,
+        );
+      }
+      await markSourceFetched(result.sourceId);
     }
-    await markSourceFetched(result.sourceId);
+    await pruneOldArticles();
+  } finally {
+    pendingProcesses = 0;
   }
-  await pruneOldArticles();
 }
 
 async function getArticlesFromDb(sourceIds) {
@@ -2001,6 +2008,7 @@ app.get("/api/status", async (req, res) => {
     lastRefresh: row?.lastRefresh ?? null,
     totalSources: counts.totalSources,
     totalArticles: counts.totalArticles,
+    pendingProcesses,
   });
 });
 

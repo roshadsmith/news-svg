@@ -149,12 +149,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ),
                     const SizedBox(height: 18),
                     _SectionCard(
-                      title: 'Crawler Status',
-                      subtitle: 'Background refresh information.',
+                      title: 'System Status Panel',
+                      subtitle: 'Database refresh information.',
                       child: _CrawlerStatus(
                         lastRefresh: widget.controller.crawlerLastRefresh,
                         totalSources: widget.controller.crawlerTotalSources,
                         totalArticles: widget.controller.crawlerTotalArticles,
+                        pendingProcesses:
+                            widget.controller.crawlerPendingProcesses,
                       ),
                     ),
                     const SizedBox(height: 18),
@@ -356,18 +358,20 @@ class _CrawlerStatus extends StatelessWidget {
     required this.lastRefresh,
     required this.totalSources,
     required this.totalArticles,
+    required this.pendingProcesses,
   });
 
   final DateTime? lastRefresh;
   final int totalSources;
   final int totalArticles;
+  final int pendingProcesses;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final refreshText = lastRefresh == null
         ? 'Warming up'
-        : 'Last refresh ${TimeOfDay.fromDateTime(lastRefresh!).format(context)}';
+        : 'Database updated ${TimeOfDay.fromDateTime(lastRefresh!.toLocal()).format(context)}';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -387,6 +391,13 @@ class _CrawlerStatus extends StatelessWidget {
         const SizedBox(height: 4),
         Text(
           'Articles stored: $totalArticles',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Pending processes: $pendingProcesses',
           style: theme.textTheme.bodySmall?.copyWith(
             color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
           ),

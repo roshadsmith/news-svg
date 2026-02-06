@@ -283,8 +283,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             final crawlerRefresh =
                                 widget.controller.crawlerLastRefresh;
                             final crawlerText = crawlerRefresh == null
-                                ? 'Crawler warming up'
-                                : 'Crawler updated ${TimeOfDay.fromDateTime(crawlerRefresh).format(context)}';
+                                ? 'Database warming up'
+                                : 'Database updated ${TimeOfDay.fromDateTime(crawlerRefresh.toLocal()).format(context)}';
                             return _Centered(
                               child: Padding(
                                 padding: const EdgeInsets.only(bottom: 8),

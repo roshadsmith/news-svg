@@ -44,6 +44,7 @@ class AppController extends ChangeNotifier {
   DateTime? _crawlerLastRefresh;
   int _crawlerTotalSources = 0;
   int _crawlerTotalArticles = 0;
+  int _crawlerPendingProcesses = 0;
   bool _hasNewContent = false;
 
   NewsSettings get settings => _settings;
@@ -57,6 +58,7 @@ class AppController extends ChangeNotifier {
   DateTime? get crawlerLastRefresh => _crawlerLastRefresh;
   int get crawlerTotalSources => _crawlerTotalSources;
   int get crawlerTotalArticles => _crawlerTotalArticles;
+  int get crawlerPendingProcesses => _crawlerPendingProcesses;
   bool get hasNewContent => _hasNewContent;
 
   Future<ArticleDetail> fetchArticleDetail(Article article) async {
@@ -274,6 +276,7 @@ class AppController extends ChangeNotifier {
       _crawlerLastRefresh = status.lastRefresh;
       _crawlerTotalSources = status.totalSources;
       _crawlerTotalArticles = status.totalArticles;
+      _crawlerPendingProcesses = status.pendingProcesses;
       final latest = status.latest;
       if (latest != null) {
         final seen = _lastContentSeenAt;
