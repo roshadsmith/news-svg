@@ -4,6 +4,8 @@ import { fileURLToPath } from "url";
 import express from "express";
 import cors from "cors";
 import { load } from "cheerio";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
 
 const app = express();
 app.use(cors());
@@ -39,6 +41,20 @@ const SOURCE_CONCURRENCY = 4;
 const FETCH_TIMEOUT_MS = 8000;
 const SOURCE_TIMEOUT_MS = 12000;
 const REQUEST_TIMEOUT_MS = 12000;
+const REFRESH_INTERVAL_MS = 12 * 60 * 1000;
+const RETENTION_DAYS = 30;
+const MAX_RESPONSE_ITEMS = 500;
+const DEFAULT_REFRESH_MINUTES = 20;
+const SOURCE_REFRESH_MINUTES = {
+  iwnsvg: 15,
+  onenews: 15,
+  stvincenttimes: 15,
+  searchlight: 20,
+  "guardian-tt": 20,
+  trinidadexpress: 20,
+  cnn: 10,
+  bbc: 10,
+};
 const LIST_CACHE_TTL_MS = 3 * 60 * 1000;
 const ARTICLE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -64,6 +80,7 @@ const detailCache = new Map();
 const fallbackImageCache = new Map();
 let backgroundRefreshInFlight = false;
 let lastBackgroundRefresh = 0;
+let db;
 
 function loadLocalEnv() {
   const currentFile = fileURLToPath(import.meta.url);
@@ -83,6 +100,282 @@ function loadLocalEnv() {
       process.env[key] = value;
     }
   });
+}
+
+async function initDb() {
+  const dbPath =
+    process.env.DB_PATH || path.join(process.cwd(), "data", "news.db");
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  db = await open({
+    filename: dbPath,
+    driver: sqlite3.Database,
+  });
+  await db.exec("PRAGMA journal_mode=WAL;");
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS sources (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      listUrl TEXT,
+      baseUrl TEXT,
+      articleUrlPatterns TEXT,
+      refreshIntervalMinutes INTEGER,
+      lastFetchedAt TEXT,
+      updatedAt TEXT
+    );
+  `);
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS articles (
+      id TEXT PRIMARY KEY,
+      url TEXT UNIQUE,
+      sourceId TEXT,
+      sourceName TEXT,
+      title TEXT,
+      publishedAt TEXT,
+      imageUrl TEXT,
+      excerpt TEXT,
+      preview TEXT,
+      author TEXT,
+      fetchedAt TEXT,
+      updatedAt TEXT
+    );
+  `);
+  await db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(sourceId);",
+  );
+  await db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(publishedAt);",
+  );
+  await db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_articles_fetched ON articles(fetchedAt);",
+  );
+
+  const columns = await db.all("PRAGMA table_info(sources);");
+  const names = new Set(columns.map((col) => col.name));
+  if (!names.has("refreshIntervalMinutes")) {
+    await db.exec("ALTER TABLE sources ADD COLUMN refreshIntervalMinutes INTEGER;");
+  }
+  if (!names.has("lastFetchedAt")) {
+    await db.exec("ALTER TABLE sources ADD COLUMN lastFetchedAt TEXT;");
+  }
+}
+
+function resolveRefreshMinutes(source) {
+  if (Number.isFinite(source.refreshIntervalMinutes)) {
+    return Math.max(5, Math.min(120, source.refreshIntervalMinutes));
+  }
+  return SOURCE_REFRESH_MINUTES[source.id] || DEFAULT_REFRESH_MINUTES;
+}
+
+async function registerSources(sources) {
+  if (!db) return;
+  const now = new Date().toISOString();
+  for (const source of sources) {
+    const patterns = Array.isArray(source.articleUrlPatterns)
+      ? JSON.stringify(source.articleUrlPatterns)
+      : null;
+    const existing = await db.get(
+      "SELECT refreshIntervalMinutes, lastFetchedAt FROM sources WHERE id = ?",
+      [source.id],
+    );
+    const refreshIntervalMinutes =
+      Number.isFinite(source.refreshIntervalMinutes)
+        ? resolveRefreshMinutes(source)
+        : existing?.refreshIntervalMinutes || resolveRefreshMinutes(source);
+    const lastFetchedAt = existing?.lastFetchedAt || null;
+    await db.run(
+      `
+      INSERT INTO sources (
+        id, name, listUrl, baseUrl, articleUrlPatterns,
+        refreshIntervalMinutes, lastFetchedAt, updatedAt
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name,
+        listUrl=excluded.listUrl,
+        baseUrl=excluded.baseUrl,
+        articleUrlPatterns=excluded.articleUrlPatterns,
+        refreshIntervalMinutes=excluded.refreshIntervalMinutes,
+        lastFetchedAt=excluded.lastFetchedAt,
+        updatedAt=excluded.updatedAt;
+      `,
+      [
+        source.id,
+        source.name,
+        source.listUrl,
+        source.baseUrl,
+        patterns,
+        refreshIntervalMinutes,
+        lastFetchedAt,
+        now,
+      ],
+    );
+  }
+}
+
+async function loadSourcesFromDb() {
+  if (!db) return [];
+  const rows = await db.all(
+    "SELECT id, name, listUrl, baseUrl, articleUrlPatterns, refreshIntervalMinutes, lastFetchedAt FROM sources;",
+  );
+  return rows.map((row) => {
+    let patterns = [];
+    if (row.articleUrlPatterns) {
+      try {
+        patterns = JSON.parse(row.articleUrlPatterns);
+      } catch {
+        patterns = [];
+      }
+    }
+    return {
+      id: row.id,
+      name: row.name,
+      listUrl: row.listUrl,
+      baseUrl: row.baseUrl,
+      articleUrlPatterns: patterns,
+      refreshIntervalMinutes: row.refreshIntervalMinutes,
+      lastFetchedAt: row.lastFetchedAt,
+    };
+  });
+}
+
+async function upsertArticles(source, items) {
+  if (!db || items.length === 0) return;
+  const now = new Date().toISOString();
+  for (const item of items) {
+    await db.run(
+      `
+      INSERT INTO articles (
+        id, url, sourceId, sourceName, title, publishedAt, imageUrl,
+        excerpt, preview, author, fetchedAt, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(url) DO UPDATE SET
+        sourceId=excluded.sourceId,
+        sourceName=excluded.sourceName,
+        title=excluded.title,
+        publishedAt=COALESCE(excluded.publishedAt, articles.publishedAt),
+        imageUrl=COALESCE(excluded.imageUrl, articles.imageUrl),
+        excerpt=COALESCE(excluded.excerpt, articles.excerpt),
+        preview=COALESCE(excluded.preview, articles.preview),
+        author=COALESCE(excluded.author, articles.author),
+        fetchedAt=excluded.fetchedAt,
+        updatedAt=excluded.updatedAt;
+      `,
+      [
+        item.id,
+        item.url,
+        source.id,
+        source.name,
+        item.title,
+        item.publishedAt,
+        item.imageUrl,
+        item.excerpt,
+        item.preview,
+        item.author,
+        now,
+        now,
+      ],
+    );
+  }
+}
+
+async function markSourceFetched(sourceId) {
+  if (!db) return;
+  await db.run("UPDATE sources SET lastFetchedAt = ? WHERE id = ?;", [
+    new Date().toISOString(),
+    sourceId,
+  ]);
+}
+
+async function pruneOldArticles() {
+  if (!db) return;
+  const cutoff = new Date(
+    Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  await db.run(
+    `
+    DELETE FROM articles
+    WHERE (publishedAt IS NOT NULL AND publishedAt < ?)
+       OR (publishedAt IS NULL AND fetchedAt < ?);
+    `,
+    [cutoff, cutoff],
+  );
+}
+
+async function refreshAllSources() {
+  const sources = await loadSourcesFromDb();
+  if (sources.length === 0) {
+    await registerSources(DEFAULT_SOURCES);
+    return refreshAllSources();
+  }
+  const now = Date.now();
+  const dueSources = sources.filter((source) => {
+    const interval = resolveRefreshMinutes(source) * 60 * 1000;
+    if (!source.lastFetchedAt) return true;
+    const last = Date.parse(source.lastFetchedAt);
+    if (Number.isNaN(last)) return true;
+    return now - last >= interval;
+  });
+
+  if (dueSources.length === 0) {
+    await pruneOldArticles();
+    return;
+  }
+
+  const results = await asyncPool(SOURCE_CONCURRENCY, dueSources, (source) =>
+    safeScrapeSource(source),
+  );
+  for (const result of results) {
+    if (result?.items?.length) {
+      await upsertArticles(
+        { id: result.sourceId, name: result.sourceName },
+        result.items,
+      );
+    }
+    await markSourceFetched(result.sourceId);
+  }
+  await pruneOldArticles();
+}
+
+async function getArticlesFromDb(sourceIds) {
+  if (!db) return [];
+  const ids = sourceIds?.filter(Boolean) ?? [];
+  const params = [];
+  let where = "";
+  if (ids.length > 0) {
+    where = `WHERE sourceId IN (${ids.map(() => "?").join(",")})`;
+    params.push(...ids);
+  }
+  const rows = await db.all(
+    `
+    SELECT id, url, sourceId, sourceName, title, publishedAt, imageUrl, excerpt, preview, author
+    FROM articles
+    ${where}
+    ORDER BY COALESCE(publishedAt, fetchedAt) DESC
+    LIMIT ?;
+    `,
+    [...params, MAX_RESPONSE_ITEMS],
+  );
+  return rows;
+}
+
+async function getLatestTimestamp(sourceIds) {
+  if (!db) return null;
+  const ids = sourceIds?.filter(Boolean) ?? [];
+  const params = [];
+  let where = "";
+  if (ids.length > 0) {
+    where = `WHERE sourceId IN (${ids.map(() => "?").join(",")})`;
+    params.push(...ids);
+  }
+  const row = await db.get(
+    `
+    SELECT MAX(COALESCE(publishedAt, fetchedAt)) AS latest
+    FROM articles
+    ${where};
+    `,
+    params,
+  );
+  return row?.latest ?? null;
 }
 
 function getCache(map, key, ttlMs) {
@@ -796,6 +1089,7 @@ function shouldTryWordPressFallback(source) {
       "cnn.com",
       "edition.cnn.com",
       "guardian.co.tt",
+      "jamaica-gleaner.com",
     ]);
     return !nonWordPressHosts.has(host);
   } catch {
@@ -861,6 +1155,130 @@ function extractArticles(html, source) {
   });
 
   return items.slice(0, MAX_ARTICLES_PER_SOURCE);
+}
+
+function extractRssLinkFromHtml(html, baseUrl) {
+  try {
+    const $ = load(html);
+    const link =
+      $('link[rel="alternate"][type*="rss"]').first().attr("href") ||
+      $('link[type*="rss"]').first().attr("href") ||
+      $('link[rel="alternate"][type*="atom"]').first().attr("href") ||
+      $('link[type*="atom"]').first().attr("href");
+    return normalizeUrl(link, baseUrl);
+  } catch {
+    return null;
+  }
+}
+
+function buildRssCandidates(source, html) {
+  const candidates = new Set();
+  const base = source.baseUrl || source.listUrl;
+  if (html) {
+    const discovered = extractRssLinkFromHtml(html, base);
+    if (discovered) candidates.add(discovered);
+  }
+  if (base) {
+    const baseUrl = new URL(base);
+    const paths = [
+      "/rss",
+      "/rss.xml",
+      "/feed",
+      "/feed/",
+      "/?feed=rss2",
+      "/?feed=rss",
+      "/?feed=atom",
+    ];
+    for (const path of paths) {
+      candidates.add(new URL(path, baseUrl).toString());
+    }
+  }
+  return Array.from(candidates);
+}
+
+function extractRssImage($item, baseUrl) {
+  const mediaContent =
+    $item.find("media\\:content").attr("url") ||
+    $item.find("media\\:thumbnail").attr("url") ||
+    $item.find("enclosure").attr("url") ||
+    null;
+  return normalizeUrl(mediaContent, baseUrl);
+}
+
+function extractRssLink($item) {
+  const link =
+    $item.find("link").first().attr("href") ||
+    $item.find("link").first().text();
+  return link ? link.trim() : null;
+}
+
+function extractRssDate($item) {
+  const value =
+    $item.find("pubDate").first().text() ||
+    $item.find("updated").first().text() ||
+    $item.find("published").first().text() ||
+    $item.find("dc\\:date").first().text();
+  return parseDate(value);
+}
+
+function extractRssExcerpt($item) {
+  const description =
+    $item.find("description").first().text() ||
+    $item.find("summary").first().text() ||
+    $item.find("content\\:encoded").first().text();
+  return stripHtml(description);
+}
+
+async function fetchRssItems(feedUrl, source) {
+  const response = await fetchWithTimeout(
+    feedUrl,
+    {
+      Accept: "application/rss+xml,application/atom+xml,application/xml,text/xml",
+    },
+    2,
+  );
+  const xml = await response.text();
+  const $ = load(xml, { xmlMode: true });
+  const items = [];
+  const entries = $("item");
+  const nodes = entries.length ? entries : $("entry");
+
+  nodes.each((_, el) => {
+    const $item = $(el);
+    const title = stripHtml($item.find("title").first().text());
+    const link = extractRssLink($item);
+    const absoluteUrl = normalizeArticleUrl(link, source.baseUrl || source.listUrl);
+    if (!title || !absoluteUrl) return;
+    if (!isLikelyArticleUrl(absoluteUrl, source)) return;
+
+    items.push({
+      id: `${source.id}:${hashString(absoluteUrl)}`,
+      title,
+      url: absoluteUrl,
+      publishedAt: extractRssDate($item),
+      imageUrl: extractRssImage($item, source.baseUrl),
+      excerpt: extractRssExcerpt($item) || null,
+      preview: null,
+      author: null,
+      sourceId: source.id,
+      sourceName: source.name,
+    });
+  });
+
+  return items.slice(0, MAX_ARTICLES_PER_SOURCE);
+}
+
+async function fetchRssFallback(source, html) {
+  const candidates = buildRssCandidates(source, html);
+  for (const candidate of candidates) {
+    try {
+      const items = await fetchRssItems(candidate, source);
+      if (items.length > 0) return items;
+    } catch {
+      continue;
+    }
+  }
+  return [];
 }
 
 function collectCandidateLinks($) {
@@ -1323,11 +1741,18 @@ async function scrapeSource(source) {
   if (cached) return cached;
 
   let items = [];
+  let listHtml = null;
   try {
-    const html = await fetchHtmlWithFallback(source.listUrl);
-    items = extractArticles(html, source);
+    listHtml = await fetchHtmlWithFallback(source.listUrl);
+    items = extractArticles(listHtml, source);
   } catch (error) {
     console.warn(`List fetch failed for ${source.name || source.listUrl}:`, error.message);
+  }
+  if (items.length === 0) {
+    const rssItems = await fetchRssFallback(source, listHtml);
+    if (rssItems.length > 0) {
+      items = rssItems;
+    }
   }
   if (items.length === 0 && shouldTryWordPressFallback(source)) {
     const wpItems = await fetchWordPressPosts(source.baseUrl, source);
@@ -1411,6 +1836,9 @@ function resolveSources(inputSources) {
       listUrl,
       baseUrl,
       articleUrlPatterns: source.articleUrlPatterns || [],
+      refreshIntervalMinutes: Number.isFinite(source.refreshIntervalMinutes)
+        ? source.refreshIntervalMinutes
+        : undefined,
     };
   });
 }
@@ -1518,67 +1946,46 @@ app.get("/api/news", async (req, res) => {
     .map((id) => id.trim())
     .filter(Boolean);
 
-  const sources = ids.length
-    ? DEFAULT_SOURCES.filter((source) => ids.includes(source.id))
-    : DEFAULT_SOURCES;
-
-  let payload;
-  try {
-    const results = await withTimeout(
-      asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
-        safeScrapeSourceWithTimeout(source),
-      ),
-      REQUEST_TIMEOUT_MS,
-      () => [],
-      new Error("request timeout"),
-    );
-    const safeResults = Array.isArray(results) ? results : [];
-    payload = buildResponse(safeResults, false);
-  } catch {
-    const cachedResults = sources
-      .map((source) =>
-        getCache(
-          listCache,
-          `${source.listUrl}|${JSON.stringify(source.articleUrlPatterns || [])}`,
-          LIST_CACHE_TTL_MS,
-        ),
-      )
-      .filter(Boolean);
-    payload = buildResponse(cachedResults, true);
-  }
-  res.json(payload);
-  maybeRefreshInBackground(sources);
+  const items = await getArticlesFromDb(ids);
+  const latest = await getLatestTimestamp(ids);
+  res.json({
+    items,
+    sources: ids.map((id) => ({ sourceId: id, sourceName: id })),
+    latest,
+  });
 });
 
 app.post("/api/news", async (req, res) => {
   const sources = resolveSources(req.body?.sources);
+  await registerSources(sources);
+  const ids = sources.map((source) => source.id);
+  const items = await getArticlesFromDb(ids);
+  const latest = await getLatestTimestamp(ids);
+  res.json({
+    items,
+    sources: sources.map(({ id, name }) => ({ sourceId: id, sourceName: name })),
+    latest,
+  });
+});
 
-  let payload;
-  try {
-    const results = await withTimeout(
-      asyncPool(SOURCE_CONCURRENCY, sources, (source) =>
-        safeScrapeSourceWithTimeout(source),
-      ),
-      REQUEST_TIMEOUT_MS,
-      () => [],
-      new Error("request timeout"),
-    );
-    const safeResults = Array.isArray(results) ? results : [];
-    payload = buildResponse(safeResults, false);
-  } catch {
-    const cachedResults = sources
-      .map((source) =>
-        getCache(
-          listCache,
-          `${source.listUrl}|${JSON.stringify(source.articleUrlPatterns || [])}`,
-          LIST_CACHE_TTL_MS,
-        ),
+app.post("/api/sources/register", async (req, res) => {
+  const sources = resolveSources(req.body?.sources);
+  await registerSources(sources);
+  res.json({ ok: true });
+});
+
+app.get("/api/status", async (req, res) => {
+  const ids = String(req.query.sources || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const latest = await getLatestTimestamp(ids);
+  const row = db
+    ? await db.get(
+        "SELECT MAX(lastFetchedAt) AS lastRefresh FROM sources;",
       )
-      .filter(Boolean);
-    payload = buildResponse(cachedResults, true);
-  }
-  res.json(payload);
-  maybeRefreshInBackground(sources);
+    : null;
+  res.json({ latest, lastRefresh: row?.lastRefresh ?? null });
 });
 
 app.post("/api/article", async (req, res) => {
@@ -1597,6 +2004,26 @@ app.post("/api/article", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`News proxy listening on http://localhost:${PORT}`);
+
+async function startServer() {
+  await initDb();
+  await registerSources(DEFAULT_SOURCES);
+
+  app.listen(PORT, () => {
+    console.log(`News proxy listening on http://localhost:${PORT}`);
+  });
+
+  refreshAllSources().catch((error) => {
+    console.warn("Initial refresh failed:", error.message);
+  });
+  setInterval(() => {
+    refreshAllSources().catch((error) => {
+      console.warn("Scheduled refresh failed:", error.message);
+    });
+  }, REFRESH_INTERVAL_MS);
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start server:", error.message);
+  process.exit(1);
 });

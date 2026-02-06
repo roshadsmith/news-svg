@@ -221,9 +221,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
 
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Added ${result.name}.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Added ${result.name}. We are fetching articles and it will be ready soon.',
+          ),
+        ),
+      );
     }
   }
 

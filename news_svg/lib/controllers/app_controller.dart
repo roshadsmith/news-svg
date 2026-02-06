@@ -27,6 +27,7 @@ class AppController extends ChangeNotifier {
   final UpdateService _updateService;
   final Map<String, ArticleDetail> _detailCache = {};
   static const int _batchSize = 4;
+  static const Duration _statusInterval = Duration(seconds: 45);
 
   NewsSettings _settings = NewsSettings.defaults(proxyUrl: defaultProxyUrl());
   List<Article> _articles = [];
@@ -37,6 +38,9 @@ class AppController extends ChangeNotifier {
   bool _sourceRefreshPending = false;
   UpdateInfo? _updateInfo;
   String? _lastShownUpdateVersion;
+  Timer? _statusTimer;
+  DateTime? _lastContentSeenAt;
+  bool _hasNewContent = false;
 
   NewsSettings get settings => _settings;
   List<Article> get articles => _articles;
@@ -46,6 +50,7 @@ class AppController extends ChangeNotifier {
   bool get initialized => _initialized;
   bool get sourceRefreshPending => _sourceRefreshPending;
   UpdateInfo? get updateInfo => _updateInfo;
+  bool get hasNewContent => _hasNewContent;
 
   Future<ArticleDetail> fetchArticleDetail(Article article) async {
     final cached = _detailCache[article.url];
@@ -68,6 +73,7 @@ class AppController extends ChangeNotifier {
     _initialized = true;
     notifyListeners();
     unawaited(checkForUpdate());
+    _startStatusPolling();
     await refresh();
   }
 
@@ -78,6 +84,7 @@ class AppController extends ChangeNotifier {
     notifyListeners();
 
     try {
+      await _registerSources();
       final enabledSources = _settings.sources
           .where((source) => source.enabled)
           .toList();
@@ -85,6 +92,7 @@ class AppController extends ChangeNotifier {
         _articles = [];
         _lastUpdated = DateTime.now();
         _sourceRefreshPending = false;
+        _hasNewContent = false;
         return;
       }
       final merged = <Article>[];
@@ -111,12 +119,16 @@ class AppController extends ChangeNotifier {
           });
           _articles = List<Article>.from(merged);
           _lastUpdated = DateTime.now();
+          _lastContentSeenAt = _computeLatestFromArticles(_articles);
+          _hasNewContent = false;
           notifyListeners();
         } catch (error) {
           _error ??= error.toString();
         }
       }
       _lastUpdated = DateTime.now();
+      _lastContentSeenAt = _computeLatestFromArticles(_articles);
+      _hasNewContent = false;
       _sourceRefreshPending = false;
     } catch (error) {
       _error = error.toString();
@@ -130,6 +142,7 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _api.dispose();
     _updateService.dispose();
+    _statusTimer?.cancel();
     super.dispose();
   }
 
@@ -220,6 +233,57 @@ class AppController extends ChangeNotifier {
   Future<void> refreshIfNeeded() async {
     if (!_sourceRefreshPending) return;
     await refresh();
+  }
+
+  Future<void> _registerSources() async {
+    try {
+      await _api.registerSources(
+        proxyUrl: _settings.proxyUrl,
+        sources: _settings.sources,
+      );
+    } catch (_) {
+      // Ignore registration errors.
+    }
+  }
+
+  void _startStatusPolling() {
+    _statusTimer?.cancel();
+    _statusTimer = Timer.periodic(_statusInterval, (_) => _pollStatus());
+  }
+
+  Future<void> _pollStatus() async {
+    if (_loading) return;
+    final ids = _settings.sources
+        .where((source) => source.enabled)
+        .map((source) => source.id)
+        .toList();
+    if (ids.isEmpty) return;
+    try {
+      final latest = await _api.fetchStatus(
+        proxyUrl: _settings.proxyUrl,
+        sourceIds: ids,
+      );
+      if (latest == null) return;
+      final seen = _lastContentSeenAt;
+      if (seen == null || latest.isAfter(seen)) {
+        _hasNewContent = true;
+        notifyListeners();
+      }
+    } catch (_) {
+      // Ignore status errors.
+    }
+  }
+
+  DateTime? _computeLatestFromArticles(List<Article> items) {
+    DateTime? latest;
+    for (final article in items) {
+      final date = article.publishedAt;
+      if (date == null) continue;
+      if (latest == null || date.isAfter(latest)) {
+        latest = date;
+      }
+    }
+    return latest ?? DateTime.now();
   }
 
   Future<void> checkForUpdate() async {

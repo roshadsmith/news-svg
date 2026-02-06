@@ -12,6 +12,54 @@ class NewsApi {
   final http.Client _client;
   static const _timeout = Duration(seconds: 60);
 
+  Future<void> registerSources({
+    required String proxyUrl,
+    required List<SourceConfig> sources,
+  }) async {
+    final uri = _resolve(proxyUrl, 'api/sources/register');
+    final body = jsonEncode({
+      'sources': sources.map((source) => source.toApiJson()).toList(),
+    });
+
+    final response = await _client
+        .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+        .timeout(_timeout);
+
+    if (response.statusCode != 200) {
+      throw Exception('Proxy error (${response.statusCode})');
+    }
+  }
+
+  Future<DateTime?> fetchStatus({
+    required String proxyUrl,
+    required List<String> sourceIds,
+  }) async {
+    final normalized = proxyUrl.endsWith('/') ? proxyUrl : '$proxyUrl/';
+    final uri = Uri.parse(normalized)
+        .resolve('api/status')
+        .replace(
+          queryParameters: {
+            if (sourceIds.isNotEmpty) 'sources': sourceIds.join(','),
+          },
+        );
+
+    final response = await _client.get(uri).timeout(_timeout);
+    if (response.statusCode != 200) {
+      throw Exception('Proxy error (${response.statusCode})');
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('Unexpected response from proxy');
+    }
+
+    final latest = decoded['latest'];
+    if (latest is String && latest.trim().isNotEmpty) {
+      return DateTime.tryParse(latest);
+    }
+    return null;
+  }
+
   Future<List<Article>> fetchArticles({
     required String proxyUrl,
     required List<SourceConfig> sources,

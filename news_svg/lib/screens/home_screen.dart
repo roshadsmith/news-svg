@@ -117,6 +117,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         onChanged: (value) =>
                             setState(() => _regionFilters = {...value}),
                       ),
+                      if (widget.controller.hasNewContent) ...[
+                        const SizedBox(height: 10),
+                        _NewContentBanner(onRefresh: widget.controller.refresh),
+                      ],
                     ],
                   ),
                 ),
@@ -188,6 +192,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     }
 
                     if (widget.controller.articles.isEmpty) {
+                      final pendingRefresh =
+                          widget.controller.loading ||
+                          widget.controller.sourceRefreshPending;
                       return RefreshIndicator(
                         onRefresh: widget.controller.refresh,
                         child: ListView(
@@ -197,15 +204,32 @@ class _HomeScreenState extends State<HomeScreen> {
                             SizedBox(
                               height: MediaQuery.of(context).size.height * 0.2,
                             ),
-                            Text(
-                              'No stories yet. Pull down to refresh or add a new source.',
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: theme.colorScheme.onSurface.withValues(
-                                  alpha: 0.7,
+                            if (pendingRefresh) ...[
+                              const Center(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
                                 ),
                               ),
-                              textAlign: TextAlign.center,
-                            ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Loading stories…',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: theme.colorScheme.onSurface.withValues(
+                                    alpha: 0.7,
+                                  ),
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ] else
+                              Text(
+                                'No stories yet. Pull down to refresh or add a new source.',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: theme.colorScheme.onSurface.withValues(
+                                    alpha: 0.7,
+                                  ),
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
                           ],
                         ),
                       );
@@ -824,6 +848,41 @@ class _ActiveSearchBanner extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _NewContentBanner extends StatelessWidget {
+  const _NewContentBanner({required this.onRefresh});
+
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.primary.withValues(alpha: 0.2),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'New stories available.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          TextButton(onPressed: onRefresh, child: const Text('Refresh')),
+        ],
       ),
     );
   }
