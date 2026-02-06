@@ -378,6 +378,16 @@ async function getLatestTimestamp(sourceIds) {
   return row?.latest ?? null;
 }
 
+async function getCounts() {
+  if (!db) return { totalSources: 0, totalArticles: 0 };
+  const sourceRow = await db.get("SELECT COUNT(*) AS count FROM sources;");
+  const articleRow = await db.get("SELECT COUNT(*) AS count FROM articles;");
+  return {
+    totalSources: sourceRow?.count ?? 0,
+    totalArticles: articleRow?.count ?? 0,
+  };
+}
+
 function getCache(map, key, ttlMs) {
   const cached = map.get(key);
   if (!cached) return null;
@@ -1985,7 +1995,13 @@ app.get("/api/status", async (req, res) => {
         "SELECT MAX(lastFetchedAt) AS lastRefresh FROM sources;",
       )
     : null;
-  res.json({ latest, lastRefresh: row?.lastRefresh ?? null });
+  const counts = await getCounts();
+  res.json({
+    latest,
+    lastRefresh: row?.lastRefresh ?? null,
+    totalSources: counts.totalSources,
+    totalArticles: counts.totalArticles,
+  });
 });
 
 app.post("/api/article", async (req, res) => {

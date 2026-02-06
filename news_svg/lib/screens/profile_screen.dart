@@ -148,6 +148,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ),
                     const SizedBox(height: 18),
+                    _SectionCard(
+                      title: 'Crawler Status',
+                      subtitle: 'Background refresh information.',
+                      child: _CrawlerStatus(
+                        lastRefresh: widget.controller.crawlerLastRefresh,
+                        totalSources: widget.controller.crawlerTotalSources,
+                        totalArticles: widget.controller.crawlerTotalArticles,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
                     Row(
                       children: [
                         Expanded(
@@ -337,6 +347,51 @@ class _SectionCard extends StatelessWidget {
           child,
         ],
       ),
+    );
+  }
+}
+
+class _CrawlerStatus extends StatelessWidget {
+  const _CrawlerStatus({
+    required this.lastRefresh,
+    required this.totalSources,
+    required this.totalArticles,
+  });
+
+  final DateTime? lastRefresh;
+  final int totalSources;
+  final int totalArticles;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final refreshText = lastRefresh == null
+        ? 'Warming up'
+        : 'Last refresh ${TimeOfDay.fromDateTime(lastRefresh!).format(context)}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          refreshText,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Sources tracked: $totalSources',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Articles stored: $totalArticles',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
+          ),
+        ),
+      ],
     );
   }
 }
