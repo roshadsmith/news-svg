@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/article.dart';
 import '../models/article_detail.dart';
+import '../models/status_info.dart';
 import '../models/source_config.dart';
 
 class NewsApi {
@@ -30,7 +31,7 @@ class NewsApi {
     }
   }
 
-  Future<DateTime?> fetchStatus({
+  Future<StatusInfo?> fetchStatus({
     required String proxyUrl,
     required List<String> sourceIds,
   }) async {
@@ -53,11 +54,7 @@ class NewsApi {
       throw Exception('Unexpected response from proxy');
     }
 
-    final latest = decoded['latest'];
-    if (latest is String && latest.trim().isNotEmpty) {
-      return DateTime.tryParse(latest);
-    }
-    return null;
+    return StatusInfo.fromJson(decoded);
   }
 
   Future<List<Article>> fetchArticles({

@@ -280,15 +280,34 @@ class _HomeScreenState extends State<HomeScreen> {
                             final lastUpdatedText = lastUpdated == null
                                 ? 'Never refreshed'
                                 : 'Updated ${TimeOfDay.fromDateTime(lastUpdated).format(context)}';
+                            final crawlerRefresh =
+                                widget.controller.crawlerLastRefresh;
+                            final crawlerText = crawlerRefresh == null
+                                ? 'Crawler warming up'
+                                : 'Crawler updated ${TimeOfDay.fromDateTime(crawlerRefresh).format(context)}';
                             return _Centered(
                               child: Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
-                                child: Text(
-                                  lastUpdatedText,
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: theme.colorScheme.onSurface
-                                        .withValues(alpha: 0.5),
-                                  ),
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      lastUpdatedText,
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(
+                                            color: theme.colorScheme.onSurface
+                                                .withValues(alpha: 0.5),
+                                          ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      crawlerText,
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(
+                                            color: theme.colorScheme.onSurface
+                                                .withValues(alpha: 0.45),
+                                          ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             );

@@ -7,6 +7,7 @@ import '../models/article_detail.dart';
 import '../models/news_category.dart';
 import '../models/news_settings.dart';
 import '../models/source_config.dart';
+import '../models/status_info.dart';
 import '../models/update_info.dart';
 import '../services/news_api.dart';
 import '../services/settings_store.dart';
@@ -40,6 +41,7 @@ class AppController extends ChangeNotifier {
   String? _lastShownUpdateVersion;
   Timer? _statusTimer;
   DateTime? _lastContentSeenAt;
+  DateTime? _crawlerLastRefresh;
   bool _hasNewContent = false;
 
   NewsSettings get settings => _settings;
@@ -50,6 +52,7 @@ class AppController extends ChangeNotifier {
   bool get initialized => _initialized;
   bool get sourceRefreshPending => _sourceRefreshPending;
   UpdateInfo? get updateInfo => _updateInfo;
+  DateTime? get crawlerLastRefresh => _crawlerLastRefresh;
   bool get hasNewContent => _hasNewContent;
 
   Future<ArticleDetail> fetchArticleDetail(Article article) async {
@@ -259,16 +262,20 @@ class AppController extends ChangeNotifier {
         .toList();
     if (ids.isEmpty) return;
     try {
-      final latest = await _api.fetchStatus(
+      final status = await _api.fetchStatus(
         proxyUrl: _settings.proxyUrl,
         sourceIds: ids,
       );
-      if (latest == null) return;
-      final seen = _lastContentSeenAt;
-      if (seen == null || latest.isAfter(seen)) {
-        _hasNewContent = true;
-        notifyListeners();
+      if (status == null) return;
+      _crawlerLastRefresh = status.lastRefresh;
+      final latest = status.latest;
+      if (latest != null) {
+        final seen = _lastContentSeenAt;
+        if (seen == null || latest.isAfter(seen)) {
+          _hasNewContent = true;
+        }
       }
+      notifyListeners();
     } catch (_) {
       // Ignore status errors.
     }
